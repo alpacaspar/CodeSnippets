@@ -1,0 +1,100 @@
+#pragma kernel CSWorley2D
+#pragma kernel CSNormalize2D
+
+static const int numThreads = 8;
+static const uint minMaxAccuracy = 255;
+
+uint2 Resolution;
+
+RWTexture2D<float4> Result;
+RWStructuredBuffer<uint> MinMax;
+StructuredBuffer<float2> PointsA;
+StructuredBuffer<float2> PointsB;
+StructuredBuffer<float2> PointsC;
+
+int NumCellsA;
+int NumCellsB;
+int NumCellsC;
+
+float Persistence;
+int Tile;
+
+static const int2 offsets[] =
+{
+    // center
+    int2(0, 0),
+    // surrounding cells
+    int2(-1, -1),
+    int2(-1, 0),
+    int2(-1, 1),
+    int2(0, -1),
+    int2(0, 1),
+    int2(1, -1),
+    int2(1, 0),
+    int2(1, 1)
+};
+
+float worley(float2 uv, StructuredBuffer<float2> points, int numCells)
+{
+    uv = uv * Tile % 1;
+    int2 cell_id = floor(uv * numCells);
+    float min_sqr_dst = 1;
+
+    for (int cell_offset_index = 0; cell_offset_index < 9; cell_offset_index++)
+    {
+        int2 neighbor = cell_id + offsets[cell_offset_index];
+
+        if (min(neighbor.x, neighbor.y) == -1 || max(neighbor.x, neighbor.y) == numCells)
+        {
+            int2 wrapped_id = (neighbor + numCells) % (uint2)numCells;
+            int neighbor_cell_id = wrapped_id.x + numCells * wrapped_id.y;
+            float2 wrapped_point = points[neighbor_cell_id];
+
+            for (int wrap_offset_index = 0; wrap_offset_index < 9; wrap_offset_index++)
+            {
+                float2 sample_offset = uv - (wrapped_point + offsets[wrap_offset_index]);
+                min_sqr_dst = min(min_sqr_dst, dot(sample_offset, sample_offset));
+            }
+        }
+        else
+        {
+            int adj_cell_index = neighbor.x + numCells * neighbor.y;
+            float2 sample_offset = uv - points[adj_cell_index];
+            min_sqr_dst = min(min_sqr_dst, dot(sample_offset, sample_offset));
+        }
+    }
+    return sqrt(min_sqr_dst);
+}
+
+[numthreads(numThreads, numThreads, 1)]
+void CSWorley2D(uint2 id : SV_DispatchThreadID)
+{
+    float2 uv = id / (float2)Resolution;
+    
+    float layer_a = worley(uv, PointsA, NumCellsA);
+    float layer_b = worley(uv, PointsB, NumCellsB);
+    float layer_c = worley(uv, PointsC, NumCellsC);
+
+    float noise_sum = layer_a + layer_b * Persistence + layer_c * Persistence * Persistence;
+    const float max_val = 1 + Persistence + Persistence * Persistence;
+
+    noise_sum /= max_val;
+    noise_sum = 1 - noise_sum;
+
+     uint val = (uint)(noise_sum * minMaxAccuracy);
+     InterlockedMin(MinMax[0], val);
+     InterlockedMax(MinMax[1], val);
+
+    Result[id] = float4(noise_sum, noise_sum, noise_sum, 1);
+}
+
+[numthreads(numThreads, numThreads, 1)]
+void CSNormalize2D(uint2 id : SV_DispatchThreadID)
+{
+    float min_val = MinMax[0] / (float)minMaxAccuracy;
+    float max_val = MinMax[1] / (float)minMaxAccuracy;
+    
+    float normalized_val = (Result[id].r - min_val) / (max_val - min_val);
+
+    Result[id] = float4(normalized_val, normalized_val, normalized_val, 1);
+}
